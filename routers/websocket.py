@@ -1,4 +1,8 @@
 import json
+import logging
+import os
+import re
+import time
 import wave
 from datetime import datetime
 from pathlib import Path
@@ -6,11 +10,8 @@ from pathlib import Path
 from fastapi import APIRouter, WebSocket
 from fastapi.concurrency import run_in_threadpool
 
-import logging
-
-import numpy as np
-
-from utils.tts import stt
+from utils.llm import ask
+from utils.stt import stt
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,15 @@ RECORDINGS = Path("recordings")
 RECORDINGS.mkdir(exist_ok=True)
 
 SAMPLE_RATE = 16000
+
+# Отвечать только на фразы с именем. Когда имя начнёт ловить ESP — поставить false в .env
+REQUIRE_WAKE_WORD = os.getenv("REQUIRE_WAKE_WORD", "true").lower() == "true"
+# Сколько секунд после ответа можно говорить без имени
+FOLLOW_UP_SECONDS = float(os.getenv("FOLLOW_UP_SECONDS", "20"))
+# Сколько последних сообщений помнить (пара реплик = 2 сообщения)
+HISTORY_LIMIT = 20
+
+WAKE = re.compile(r"д?жесс?ик|jess?ica", re.IGNORECASE)
 
 
 def save_wav(pcm: bytes) -> Path:
@@ -32,35 +42,80 @@ def save_wav(pcm: bytes) -> Path:
     return path
 
 
+async def send_json(websocket: WebSocket, **data) -> None:
+    # ensure_ascii=False — чтобы кириллица шла буквами, а не \u0414...
+    await websocket.send_text(json.dumps(data, ensure_ascii=False))
+
+
 @ws_router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+
+    # Всё это — своё у каждого подключения (у каждой ESP)
     buffer = bytearray()
     recording = False
+    history: list[dict] = []        # память диалога: только текст реплик
+    active_until = 0.0              # до этого момента имя называть не нужно
 
     while True:
         message = await websocket.receive()
-        logger.debug(f"Received message: {message}")
         if message["type"] == "websocket.disconnect":
             break
 
         if message.get("text") is not None:          # управляющее сообщение
             event = json.loads(message["text"])
+            logger.debug("event: %s", event)          # байты звука не логируем — их слишком много
 
             if event["type"] == "start":
                 buffer.clear()
                 recording = True
-                await websocket.send_text(json.dumps({"type": "listening"}))
+                await send_json(websocket, type="listening")
 
             elif event["type"] == "end" and recording:
                 recording = False
-                response = await run_in_threadpool(stt, bytes(buffer))
-                logger.debug(f"Received response: {response}")
+                pcm = bytes(buffer)
+                buffer.clear()
+                try:
+                # 1. Голос -> текст
+                    text = (await run_in_threadpool(stt, pcm)).strip()
+                    logger.info("heard: %r", text)
+                    await send_json(websocket, type="heard", text=text)
+                    if not text:
+                        continue
 
-                # path = save_wav(bytes(buffer))
-                # await websocket.send_text(json.dumps({
-                #     "type": "saved", "file": path.name, "bytes": len(buffer),
-                # }))
+                    # 2. Это обращение к Джесике?
+                    addressed = (
+                        not REQUIRE_WAKE_WORD
+                        or WAKE.search(text)
+                        or time.monotonic() < active_until
+                    )
+                    if not addressed:
+                        continue
+
+                    # 3. Текст -> Claude
+                    await send_json(websocket, type="thinking")
+                    try:
+                        meta, answer = await ask(history, text)
+                    except Exception:
+                        logger.exception("claude request failed")
+                        await send_json(websocket, type="reply", emotion="sad",
+                                        text="Ой, я что-то задумалась. Повтори, пожалуйста?")
+                        continue
+
+                    logger.info("said (%s): %r", meta["emotion"], answer)
+
+                    # 4. Запоминаем реплики (ответ — без JSON-строки)
+                    history.append({"role": "user", "content": text})
+                    history.append({"role": "assistant", "content": answer})
+                    del history[:-HISTORY_LIMIT]
+
+                    # 5. Разговор продолжается — следующие секунды имя не нужно
+                    active_until = time.monotonic() + FOLLOW_UP_SECONDS
+
+                    await send_json(websocket, type="reply",
+                                    emotion=meta["emotion"], text=answer)
+                finally:
+                    await send_json(websocket, type="done")
 
         elif message.get("bytes") is not None:      # кусок звука
             if recording:
