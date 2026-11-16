@@ -3,8 +3,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    environment:
+      - HF_HOME=/models/huggingface
+      - TORCH_HOME=/models/torch     # заодно для Silero
+      - WHISPER_MODEL=small
+      - WHISPER_DEVICE=cpu
+      - WHISPER_COMPUTE_TYPE=int8
     ports:
       - "9000:9000"
+    volumes:
+      - ./models:/models
     restart: unless-stopped
-
-

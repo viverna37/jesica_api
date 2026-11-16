@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, WebSocket
+from fastapi.concurrency import run_in_threadpool
 
 import logging
 
@@ -11,8 +12,7 @@ import numpy as np
 
 from utils.tts import stt
 
-logger = logging.Logger(__name__)
-logger.setLevel(logging.INFO)
+logger = logging.getLogger(__name__)
 
 ws_router = APIRouter()
 
@@ -54,7 +54,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif event["type"] == "end" and recording:
                 recording = False
-                response = stt(bytes(buffer))
+                response = await run_in_threadpool(stt, bytes(buffer))
                 logger.debug(f"Received response: {response}")
 
                 # path = save_wav(bytes(buffer))
