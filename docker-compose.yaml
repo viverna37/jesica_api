@@ -3,6 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    env_file: .env
     environment:
       - HF_HOME=/models/huggingface
       - TORCH_HOME=/models/torch     # заодно для Silero

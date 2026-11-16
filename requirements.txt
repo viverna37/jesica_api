@@ -1,6 +1,9 @@
+# torch ставится отдельно в Dockerfile (CPU-сборка)
 fastapi==0.163.0
 uvicorn
 websockets
 numpy
 faster-whisper
 anthropic
+omegaconf
+num2words

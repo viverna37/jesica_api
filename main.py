@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.concurrency import run_in_threadpool
 
-from utils.stt import load_model
+from utils import stt, tts
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 for noisy in ("httpx", "httpx2", "huggingface_hub"):
@@ -13,7 +13,9 @@ for noisy in ("httpx", "httpx2", "huggingface_hub"):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await run_in_threadpool(load_model)
+    # Модели грузим один раз при старте. Первый запуск долгий: они скачиваются в /models
+    await run_in_threadpool(stt.load_model)
+    await run_in_threadpool(tts.load_model)
     yield
 
 
